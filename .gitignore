@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 執行產物
+result/
+images/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,38 @@
+# 各 site 的色彩均勻度判定標準。
+# - 呼叫 API 時帶 site=<名稱> 即套用該 site 標準；未帶 site 則用 default。
+# - 各 site 未寫的欄位會沿用 default。
+# - 請求中明確帶入的參數會覆蓋 site 標準（回傳的 applied_settings 會註明來源）。
+# - 修改本檔後不需重啟 API，下一次請求即生效。
+#
+# 可用欄位：
+#   threshold       整體（格子）最大允許 ΔE00
+#   spot_threshold  小點偵測 ΔE00 門檻（null = 沿用 threshold）
+#   min_spot_size   小點最小尺寸，照片長邊的百分比（0.5 = 長邊的 0.5%）；更小的視為灰塵。
+#                   以比例表示，照片解析度不同仍是同一標準。可偵測下限約 0.25%
+#   rows, cols      整體偵測的切格數
+#   margin          每格內縮比例 0–0.5
+#   reference       參考色 #RRGGBB。建議維持 null：每張圖自動以自己的主色為基準判斷；
+#                   僅在確定有標準色時才填
+#
+# ⚠ 以下 site 名稱與數值為範例，請改成各廠實際規格。
+
+default:
+  threshold: 3.0
+  spot_threshold: null
+  min_spot_size: 0.5
+  rows: 5
+  cols: 5
+  margin: 0.1
+  reference: null
+
+sites:
+  site_a:            # 範例：規格較嚴
+    threshold: 2.0
+    spot_threshold: 2.5
+    min_spot_size: 0.35
+    rows: 8
+    cols: 8
+
+  site_b:            # 範例：規格較寬
+    threshold: 4.0
+    min_spot_size: 1.0
