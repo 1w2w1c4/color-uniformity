@@ -9,7 +9,7 @@ from PIL import Image
 import main
 from main import app
 from sites import SiteConfigError, SiteRegistry, parse_config
-from uniformity import delta_e_2000, srgb_to_lab
+from uniformity import analyze, delta_e_2000, srgb_to_lab
 
 client = TestClient(app)
 
@@ -284,14 +284,14 @@ def summarize_of(img, **data):
 def test_summary_pass():
     a = np.clip(np.full((300, 400, 3), RED, float) + np.random.default_rng(0).normal(0, 3, (300, 400, 3)), 0, 255)
     s = summarize_of(a)["summary"]
-    assert s.startswith("【合格】整體與局部皆均勻。")
+    assert s.startswith("【Pass】整體與局部皆均勻。")
     assert "第一階段整體均勻度通過" in s and "第二階段局部瑕疵通過" in s
 
 
 def test_summary_grid_ok_but_spot():
     r = summarize_of(red_with_spot(600, 450, 30))
     s = r["summary"]
-    assert s.startswith("【不合格】整體顏色均勻，但有局部瑕疵。")
+    assert s.startswith("【Fail】整體顏色均勻，但有局部瑕疵。")
     assert "第一階段整體均勻度通過" in s and "第二階段局部瑕疵不通過" in s
     assert "中央的泛白小點" in s and "(600, 450)" in s.replace("(601", "(600").replace(", 451)", ", 450)")
 
@@ -300,7 +300,7 @@ def test_summary_both_fail_mentions_position_and_tone():
     img = np.full((300, 400, 3), RED, float)
     img[:, 300:] = WHITE  # 右側泛白
     s = summarize_of(img)["summary"]
-    assert s.startswith("【不合格】整體與局部皆不均勻。")
+    assert s.startswith("【Fail】整體與局部皆不均勻。")
     assert "第一階段整體均勻度不通過" in s and "右" in s and "泛白" in s
     assert "1 處大面積" in s
 
@@ -429,3 +429,128 @@ def test_low_resolution_warning_in_summary():
     assert r["spots"]["detectable_min_pct"] > 0.5 and "本張照片解析度較低" in r["summary"]
     r = summarize_of(np.full((900, 1200, 3), RED), min_spot_size=0.5)
     assert "本張照片解析度較低" not in r["summary"]
+
+
+# ---------------------------------------------------------------- 漸層拆解（max_gradient）與周圍比較（spot_mode=local）
+
+def panel(H=450, W=600, shade=(1.0, 1.0), faint=None, white=None, blotch=None, seed=0):
+    """紅色面板：shade = 左、右亮度倍率（打光漸層）；faint／white／blotch = (cx, cy, r)。"""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[:H, :W]
+    img = np.array([200, 22, 34], float) * np.linspace(*shade, W)[None, :, None] * np.ones((H, W, 3))
+    disk = lambda cx, cy, r: ((yy - cy) ** 2 + (xx - cx) ** 2 < r ** 2)  # noqa: E731
+    if blotch:
+        img[disk(*blotch)] *= 1.22
+    if faint:
+        img[disk(*faint)] *= 1.22
+    if white:
+        img[disk(*white)] = (250, 240, 240)
+    return np.clip(img + rng.normal(0, 3, img.shape), 0, 255).astype(np.uint8)
+
+
+LIT = dict(shade=(1.25, 0.62))                       # 左亮右暗，ΔE 約 20
+NEW = dict(threshold=3.0, spot_threshold=5.0, min_spot_size=0.5)
+
+
+def test_new_site_fields_default_to_original_behaviour():
+    cfg, src = main.registry.resolve(None, {})       # 測試設定檔沒寫新欄位
+    assert (cfg["max_gradient"], cfg["spot_mode"], cfg["background_size"]) == (None, "global", 10.0)
+    assert src["spot_mode"] == "default"
+
+
+@pytest.mark.parametrize("field,value", [("spot_mode", "nearby"), ("background_size", 0),
+                                         ("background_size", 80), ("max_gradient", -1)])
+def test_new_site_fields_validated(field, value):
+    raw = {"default": {"threshold": 3.0, "spot_threshold": None, "min_spot_size": 0.5, "rows": 5,
+                       "cols": 5, "margin": 0.1, "reference": None, field: value}}
+    with pytest.raises(SiteConfigError, match=field):
+        parse_config(raw)
+
+
+def test_project_sites_yaml_site_c():
+    reg = SiteRegistry(Path(main.__file__).resolve().parent / "sites.yaml")
+    cfg, _ = reg.resolve("site_c", {})
+    assert (cfg["max_gradient"], cfg["spot_mode"], cfg["spot_threshold"]) == (25.0, "local", 5.0)
+    assert reg.resolve(None, {})[0]["spot_mode"] == "global"
+
+
+def test_lighting_gradient_fails_reference_mode_but_passes_detrended():
+    rgb = panel(**LIT)
+    old = analyze(rgb, **NEW)
+    assert not old.grid_passed and old.delta_e_max > 15 and old.grid_mode == "reference" and old.gradient is None
+    new = analyze(rgb, **NEW, max_gradient=25)
+    assert new.grid_passed and new.delta_e_max < 1 and new.grid_mode == "detrended"
+    g = new.gradient
+    assert 15 < g["span"] < 25 and g["passed"] and g["bright_side"] == "左側" and g["dark_side"] == "右側"
+
+
+def test_gradient_beyond_limit_fails():
+    r = analyze(panel(**LIT), **NEW, max_gradient=10)
+    assert not r.grid_passed and not r.gradient["passed"] and r.cells_over_threshold == 0
+
+
+def test_detrended_still_catches_central_blotch():
+    r = analyze(panel(blotch=(300, 225, 75)), **NEW, max_gradient=25)
+    assert not r.grid_passed and r.delta_e_max > 5
+    assert r.worst_cell["position"] == "中央" and r.worst_cell["tone"] in ("偏亮", "泛白")
+
+
+def test_local_mode_ignores_gradient_and_finds_faint_spot():
+    rgb = panel(**LIT, faint=(450, 100, 10), white=(150, 330, 8))
+    glob = analyze(rgb, **NEW)
+    assert glob.spots["region_count"] >= 1                     # 打光漸層被當成大面積瑕疵
+    loc = analyze(rgb, **NEW, spot_mode="local")
+    pos = sorted((it["position"], it["tone"]) for it in loc.spots["items"])
+    assert loc.spots["count"] == 2 and loc.spots["region_count"] == 0
+    assert [p for p, _ in pos] == ["右上方", "左下方"]
+    assert dict(pos)["右上方"] in ("偏亮", "泛白") and dict(pos)["左下方"] == "泛白"
+    assert loc.spots["mode"] == "local" and loc.spots["background_size_pct"] == 10
+    assert glob.spots["mode"] == "global" and glob.spots["background_size_pct"] is None
+
+
+def test_local_mode_misses_large_blotch_but_stage1_catches_it():
+    r = analyze(panel(blotch=(300, 225, 120)), **NEW, max_gradient=25, spot_mode="local")
+    assert r.spots["region_count"] == 0 and not r.grid_passed
+
+
+@pytest.mark.parametrize("kw", [dict(max_gradient=0), dict(spot_mode="nearby"), dict(background_size=0.5)])
+def test_analyze_rejects_bad_new_params(kw):
+    with pytest.raises(ValueError):
+        analyze(panel(), **kw)
+
+
+def test_api_new_params_and_summary():
+    data = png(panel(**LIT, white=(150, 300, 8)))
+    r = client.post("/v1/uniformity", files={"file": ("lit.png", data, "image/png")},
+                    data={"max_gradient": "25", "spot_mode": "local", "spot_threshold": "5"})
+    body = r.json()
+    assert r.status_code == 200 and body["grid_passed"] and not body["spots"]["passed"]
+    assert body["applied_settings"]["spot_mode"] == {"value": "local", "source": "request"}
+    assert body["gradient"]["limit"] == 25 and body["grid_mode"] == "detrended"
+    s = body["summary"]
+    assert "扣除平滑漸層後" in s and "左側較亮、右側較暗" in s and "在容許範圍內" in s
+    assert "與周圍比較（範圍長邊 10%）" in s
+
+
+def test_api_gradient_over_limit_summary():
+    body = client.post("/v1/uniformity", files={"file": ("lit.png", png(panel(**LIT)), "image/png")},
+                       data={"max_gradient": "10"}).json()
+    assert "第一階段整體均勻度不通過" in body["summary"] and "超過上限" in body["summary"]
+    assert "未超過" in body["summary"]
+
+
+def test_api_rejects_bad_spot_mode():
+    r = client.post("/v1/uniformity", files={"file": ("a.png", png(panel()), "image/png")},
+                    data={"spot_mode": "nearby"})
+    assert r.status_code == 422
+
+
+def test_summary_skips_coverage_warning_when_both_local():
+    data = png(panel(**LIT))
+    both = client.post("/v1/uniformity", files={"file": ("lit.png", data, "image/png")},
+                       data={"max_gradient": "25", "spot_mode": "local", "spot_threshold": "5"}).json()
+    assert both["reference_coverage"] < 0.5
+    assert "注意" not in both["summary"] and "未使用整張主色" in both["summary"]
+    only_spot = client.post("/v1/uniformity", files={"file": ("lit.png", data, "image/png")},
+                            data={"spot_mode": "local"}).json()       # 第一階段仍對主色 → 保留提醒
+    assert "基準色為影像主色" in only_spot["summary"]

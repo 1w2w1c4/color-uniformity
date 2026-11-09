@@ -13,22 +13,32 @@
 #   margin          每格內縮比例 0–0.5
 #   reference       參考色 #RRGGBB。建議維持 null：每張圖自動以自己的主色為基準判斷；
 #                   僅在確定有標準色時才填
+#   max_gradient    第一階段可容忍的平滑漸層幅度 ΔE00（打光不均造成的左亮右暗等）。
+#                   null = 原本做法（各格對主色）。設定後各格改與擬合的平滑漸層比較，
+#                   殘差 ≤ threshold 且漸層幅度 ≤ max_gradient 才通過。
+#                   ⚠ 幅度在此值內的平順單側褪色會被當成打光放過；根本解法是改善打光或平場校正
+#   spot_mode       第二階段比較對象：global = 整張主色（原本做法）；local = 周圍背景。
+#                   local 不受打光漸層影響，spot_threshold 可降回約 5；
+#                   但比 background_size 大的瑕疵會被當成背景，需靠第一階段抓
+#   background_size spot_mode=local 時周圍背景的範圍，長邊百分比（1–50，預設 10）
 #
 # ⚠ 以下 site 名稱與數值為範例，請改成各廠實際規格。
 
 default:
   threshold: 3.0
-  spot_threshold: null
+  spot_threshold: 10.0  # 小點門檻與整體門檻分開：逐像素比對受雜訊、紋理、反光影響較大。依實際照片測試定為 10
   min_spot_size: 0.5
   rows: 5
   cols: 5
   margin: 0.1
   reference: null
+  max_gradient: null    # null = 原本做法
+  spot_mode: global     # global = 原本做法
+  background_size: 10.0
 
 sites:
   site_a:            # 範例：規格較嚴
     threshold: 2.0
-    spot_threshold: 2.5
     min_spot_size: 0.35
     rows: 8
     cols: 8
@@ -36,3 +46,9 @@ sites:
   site_b:            # 範例：規格較寬
     threshold: 4.0
     min_spot_size: 1.0
+
+  site_c:            # 範例：打光不均的站點——容忍平滑漸層，小點改與周圍比較
+    threshold: 3.0
+    max_gradient: 25.0
+    spot_mode: local
+    spot_threshold: 5.0

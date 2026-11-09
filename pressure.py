@@ -335,7 +335,7 @@ def _pct(v: float) -> str:
 
 def summarize_pressure(r: dict) -> str:
     c, sh = r["checks"], r["shape"]
-    parts = ["【合格】壓力分布均勻。" if r["passed"] else "【不合格】壓力分布不均勻。"]
+    parts = ["【Pass】壓力分布均勻。" if r["passed"] else "【Fail】壓力分布不均勻。"]
     parts.append(f"相對壓力 CV {_pct(c['cv']['value'])}（上限 {_pct(c['cv']['limit'])}），"
                  f"p5/p95 = {c['uniformity_p5_p95']['value']:.2f}（下限 {c['uniformity_p5_p95']['limit']:.2f}），"
                  f"接觸面積 {_pct(c['contact_ratio']['value'])}。")
@@ -388,7 +388,9 @@ def render_pressure_report(result: dict, extra: dict, path: Path, title: str = "
 
     ok = result["passed"]
     d.rounded_rectangle([PAD, PAD, PAD + 150, PAD + 40], radius=8, fill=GOOD if ok else CRITICAL)
-    d.text((PAD + 14, PAD + 4), "合格" if ok else "不合格", fill="#ffffff", font=f_title)
+    badge = "Pass" if ok else "Fail"
+    _, t, _, b = d.textbbox((0, 0), badge, font=f_title)
+    d.text((PAD + 14, PAD + 20 - (t + b) / 2), badge, fill="#ffffff", font=f_title)  # 依實際字高垂直置中
     d.text((PAD + 170, PAD + 10), f"{title}　壓力模式　通道 {result['channel']}　{result['dpi']:g} DPI",
            fill=INK, font=f_head)
 

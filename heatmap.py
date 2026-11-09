@@ -3,7 +3,7 @@
 版面：
   標題列（檔名、site、判定結果）
   [原圖＋瑕疵框] [第一階段：格子 ΔE 熱圖] [第二階段：逐像素 ΔE 熱圖]
-  色階（固定 0–10，不同圖片可直接比較；標出兩階段門檻）
+  色階（固定 0–SCALE_MAX，不同圖片可直接比較；標出兩階段門檻）
   綜合說明 summary
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ from scipy import ndimage
 # 單一色相（藍）由淺到深的連續色階：淺 = 色差小（均勻），深 = 色差大（不均勻）
 RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
         "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
-SCALE_MAX = 10.0        # 色階上限 ΔE00；≥10 皆以最深色呈現（已屬非常明顯）
+SCALE_MAX = 20.0        # 色階上限 ΔE00；≥20 皆以最深色呈現。須高於小點門檻（目前 10），才分得出門檻上下的輕重
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_2 = "#52514e"
@@ -155,11 +155,12 @@ def render_report(img: Image.Image, result: dict, de_map: np.ndarray, defect_map
 
     # 標題列：判定以「圖示＋文字」呈現，不只靠顏色
     ok = result["passed"]
-    badge = "合格" if ok else "不合格"
+    badge = "Pass" if ok else "Fail"
     bw = f_title.getlength(badge) + 58
     d.rounded_rectangle([PAD, PAD, PAD + bw, PAD + 38], radius=6, fill=GOOD if ok else CRITICAL)
     _badge_icon(d, PAD + 13, PAD + 10, ok)
-    d.text((PAD + 42, PAD + 3), badge, fill="#ffffff", font=f_title)
+    _, t, _, b = d.textbbox((0, 0), badge, font=f_title)
+    d.text((PAD + 42, PAD + 19 - (t + b) / 2), badge, fill="#ffffff", font=f_title)  # 依實際字高垂直置中
     d.text((PAD + bw + 16, PAD + 8),
            f"{result['filename']}　·　site：{result['site']}　·　基準色 {result['reference_hex']}",
            fill=INK, font=f_head)
@@ -169,9 +170,11 @@ def render_report(img: Image.Image, result: dict, de_map: np.ndarray, defect_map
               "_center": to_analyzed([*it["center"], 0, 0])[:2]} for it in result["spots"]["items"]]
     grid_ok = "通過" if result["grid_passed"] else "不通過"
     spot_ok = "通過" if result["spots"]["passed"] else "不通過"
+    detrended = result.get("grid_mode") == "detrended"
+    local = result["spots"].get("mode") == "local"
     heads = ["原圖（描邊 = 局部瑕疵）",
-             f"第一階段 整體 {result['rows']}×{result['cols']} 格 ΔE｜{grid_ok}",
-             f"第二階段 逐像素 ΔE｜{spot_ok}（{result['spots']['count']} 處）"]
+             f"第一階段 {'扣除漸層' if detrended else '整體'} {result['rows']}×{result['cols']} 格 ΔE｜{grid_ok}",
+             f"第二階段 逐像素 ΔE{'（對周圍）' if local else ''}｜{spot_ok}（{result['spots']['count']} 處）"]
     for x, h in zip(xs, heads):
         d.text((x, top - 28), h, fill=INK, font=f_head)
 
@@ -208,12 +211,12 @@ def render_report(img: Image.Image, result: dict, de_map: np.ndarray, defect_map
     for x in xs:
         d.rectangle([x - 1, top - 1, x + PANEL_W, top + ph], outline=GRID_LINE)
 
-    # 色階：固定 0–10，標出兩階段門檻
+    # 色階：固定 0–SCALE_MAX，標出兩階段門檻
     lx, lw, lh = PAD, 520, 14
     bar = colorize(np.tile(np.linspace(0, SCALE_MAX, lw), (lh, 1)))
     canvas.paste(Image.fromarray(bar), (lx, legend_y))
     d.text((lx, legend_y - 24), "色差 ΔE00（淺 = 均勻，深 = 不均勻）", fill=INK_2, font=f_small)
-    for v in range(0, int(SCALE_MAX) + 1, 2):
+    for v in range(0, int(SCALE_MAX) + 1, max(1, int(SCALE_MAX) // 5)):
         tx = lx + v / SCALE_MAX * (lw - 1)
         d.line([tx, legend_y + lh, tx, legend_y + lh + 4], fill=INK_2)
         lab = f"≥{v}" if v == SCALE_MAX else str(v)

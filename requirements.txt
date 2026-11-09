@@ -5,3 +5,4 @@ numpy
 pillow
 scipy
 pyyaml
+anthropic

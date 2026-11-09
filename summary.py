@@ -23,23 +23,39 @@ def _fmt(v: float) -> str:
 
 def summarize(r: dict) -> str:
     """r：API 回傳的完整結果（座標已換算回原圖）。"""
-    verdict = "合格" if r["passed"] else "不合格"
+    verdict = "Pass" if r["passed"] else "Fail"
 
     # 第一階段：整體
     grid = f"{r['rows']}×{r['cols']} 格"
     wc = r["worst_cell"]
+    g = r.get("gradient")
+    basis = "扣除平滑漸層後" if g else ""
+    grad_txt = ""
+    if g:
+        direction = f"，{g['bright_side']}較亮、{g['dark_side']}較暗" if g["span"] >= 1 else ""
+        grad_txt = f"漸層幅度 ΔE {_fmt(g['span'])}（上限 {_fmt(g['limit'])}{direction}）"
     if r["grid_passed"]:
-        stage1 = (f"第一階段整體均勻度通過：{grid}中最大色差 ΔE {_fmt(r['delta_e_max'])}"
-                  f"（門檻 {_fmt(r['threshold'])}，{visibility(r['delta_e_max'])}）。")
+        stage1 = (f"第一階段整體均勻度通過：{grid}{basis}中最大色差 ΔE {_fmt(r['delta_e_max'])}"
+                  f"（門檻 {_fmt(r['threshold'])}，{visibility(r['delta_e_max'])}）"
+                  + (f"；{grad_txt}，在容許範圍內" if g else "") + "。")
     else:
-        stage1 = (f"第一階段整體均勻度不通過：{grid}中有 {r['cells_over_threshold']} 格超過門檻 "
-                  f"ΔE {_fmt(r['threshold'])}，最嚴重在畫面{wc['position']}"
-                  f"（第 {wc['row'] + 1} 列第 {wc['col'] + 1} 欄），{wc['tone']}，"
-                  f"色差 ΔE {_fmt(wc['delta_e'])}（{visibility(wc['delta_e'])}）。")
+        parts = []
+        if r["cells_over_threshold"]:
+            parts.append(f"{grid}{basis}中有 {r['cells_over_threshold']} 格超過門檻 "
+                         f"ΔE {_fmt(r['threshold'])}，最嚴重在畫面{wc['position']}"
+                         f"（第 {wc['row'] + 1} 列第 {wc['col'] + 1} 欄），{wc['tone']}，"
+                         f"色差 ΔE {_fmt(wc['delta_e'])}（{visibility(wc['delta_e'])}）")
+        else:
+            parts.append(f"{grid}{basis}中最大色差 ΔE {_fmt(r['delta_e_max'])}（門檻 {_fmt(r['threshold'])}，未超過）")
+        if g:
+            parts.append(grad_txt + ("，超過上限" if not g["passed"] else "，在容許範圍內"))
+        stage1 = "第一階段整體均勻度不通過：" + "；".join(parts) + "。"
 
     # 第二階段：局部瑕疵
     sp = r["spots"]
     rule = f"門檻 ΔE {_fmt(sp['threshold'])}、最小尺寸為長邊 {_fmt(sp['min_spot_size_pct'])}%"
+    if sp.get("mode") == "local":
+        rule += f"、與周圍比較（範圍長邊 {_fmt(sp['background_size_pct'])}%）"
     if sp["passed"]:
         stage2 = f"第二階段局部瑕疵通過：未發現超過標準的瑕疵（{rule}）。"
     else:
@@ -66,6 +82,10 @@ def summarize(r: dict) -> str:
     if sp["min_spot_size_pct"] < sp["detectable_min_pct"]:
         stage2 += (f"（本張照片解析度較低，小於長邊 {_fmt(sp['detectable_min_pct'])}% 的瑕疵可能無法偵測；"
                    "如需偵測更小的瑕疵，請提高拍攝解析度或以 roi 只框產品範圍。）")
+
+    if g and sp.get("mode") == "local":
+        # 兩階段都不與整張主色比較：主色覆蓋率會被打光漸層拉低，但不影響判定，不需提醒
+        return f"【{verdict}】{conclusion}{stage1}{stage2}兩階段皆以局部基準判定（漸層擬合、周圍背景），未使用整張主色。"
 
     ref = f"基準色為{'影像主色' if r['reference_source'].startswith('影像') else '指定色'} {r['reference_hex']}"
     note = ""

@@ -121,6 +121,8 @@ class UniformityResult:
     spots: dict
     passed: bool
     score: float
+    grid_mode: str = "reference"     # reference：各格對主色；detrended：各格對擬合漸層（扣除平滑漸層後的殘差）
+    gradient: dict | None = None     # detrended 時的漸層資訊：span、limit、passed、bright_side、dark_side
     pixel_delta_e: np.ndarray | None = field(default=None, repr=False)  # 逐像素 ΔE（工作解析度），供熱圖使用
     defect_map: np.ndarray | None = field(default=None, repr=False)     # 瑕疵編號圖（工作解析度），供熱圖使用
 
@@ -160,6 +162,49 @@ def position_name(fx: float, fy: float) -> str:
     if col and row:
         return f"{col}{row}方"
     return f"{col or row}側" if col else f"{row}方"
+
+
+def fit_gradient(cell_lab: np.ndarray) -> tuple[np.ndarray, dict]:
+    """以平面（L*、a*、b* 各自線性）擬合各格顏色，拆出「平滑漸層」。
+
+    打光不均、單側褪色在影像上都是平滑的亮暗變化，平面即可描述；扣掉平面後剩下的殘差才是局部不均
+    （中央泛色、斑駁）。回傳 (擬合值, 漸層資訊)。漸層幅度 = 擬合平面四角之間最大的 ΔE00。
+    """
+    rows, cols = cell_lab.shape[:2]
+    yy, xx = np.mgrid[:rows, :cols]
+    xn, yn = (xx + 0.5) / cols - 0.5, (yy + 0.5) / rows - 0.5
+    A = np.stack([np.ones(rows * cols), xn.ravel(), yn.ravel()], axis=1)
+    coef, *_ = np.linalg.lstsq(A, cell_lab.reshape(-1, 3), rcond=None)   # (3 係數, 3 通道)
+    fit = (A @ coef).reshape(rows, cols, 3)
+    corners = fit[[0, 0, -1, -1], [0, -1, 0, -1]]
+    span = float(max(delta_e_2000(corners[i], corners[j]) for i in range(4) for j in range(i + 1, 4)))
+    gx, gy = coef[1, 0], coef[2, 0]                    # L* 的水平、垂直斜率（正 = 往右／往下變亮）
+    n = float(np.hypot(gx, gy))
+    if n < 1e-6:
+        bright = dark = "無"
+    else:
+        ux, uy = gx / n, gy / n
+        bright = position_name(0.5 + 0.5 * ux, 0.5 + 0.5 * uy)
+        dark = position_name(0.5 - 0.5 * ux, 0.5 - 0.5 * uy)
+    return fit, {"span": round(span, 3), "bright_side": bright, "dark_side": dark}
+
+
+def local_background(lab: np.ndarray, size_pct: float) -> np.ndarray:
+    """逐像素的「周圍背景色」：大範圍中值濾波（中值不會被瑕疵本身拉偏）。
+
+    size_pct：背景範圍，長邊的百分比。比此範圍小的瑕疵可被偵測；更大的瑕疵會被當成背景，
+    交由第一階段（切格）負責。為了速度，先縮到長邊約 160px 做中值濾波，再放大回原尺寸。
+    """
+    h, w = lab.shape[:2]
+    f = max(1.0, max(h, w) / 160)
+    sw, sh = max(1, round(w / f)), max(1, round(h / f))
+    k = max(3, int(round(size_pct / 100 * max(sw, sh))) | 1)
+    out = np.empty_like(lab)
+    for c in range(3):
+        small = np.asarray(Image.fromarray(lab[..., c].astype(np.float32)).resize((sw, sh), Image.Resampling.BOX))
+        med = ndimage.median_filter(small, size=k, mode="reflect")
+        out[..., c] = np.asarray(Image.fromarray(med).resize((w, h), Image.Resampling.BILINEAR))
+    return out
 
 
 def _score(de_max: float, threshold: float) -> float:
@@ -219,6 +264,7 @@ def detect_spots(lab: np.ndarray, size: tuple[int, int], ref_lab: np.ndarray,
     """第二階段：逐像素比對參考色，找出局部瑕疵（如單一小白點）。
 
     lab 為 working_lab() 的結果；size 為輸入影像 (H, W)。
+    ref_lab 可為單一顏色 (3,)（與主色比較），或與 lab 同尺寸的逐像素背景 (h, w, 3)（與周圍比較）。
     1. 每個像素計算與參考色的 ΔE00，超過 threshold 者標為瑕疵像素。
     2. 相鄰（8 連通）瑕疵像素合併成一塊；面積小於 min_area（輸入影像像素²）的視為灰塵忽略。
     回傳 (結果, 逐像素 ΔE, 瑕疵編號圖)。結果中的座標與面積皆換算回輸入影像的像素單位；
@@ -240,6 +286,10 @@ def detect_spots(lab: np.ndarray, size: tuple[int, int], ref_lab: np.ndarray,
         means = ndimage.mean(de, labels, idx)
         centers = ndimage.center_of_mass(mask, labels, idx)
         mean_lab = np.stack([ndimage.mean(lab[..., k], labels, idx) for k in range(3)], axis=-1)
+        if np.ndim(ref_lab) == 3:   # 逐像素背景：以瑕疵範圍內的平均背景色判斷 tone
+            item_ref = np.stack([ndimage.mean(ref_lab[..., k], labels, idx) for k in range(3)], axis=-1)
+        else:
+            item_ref = np.broadcast_to(ref_lab, (n, 3))
         for i, sl in enumerate(ndimage.find_objects(labels)):
             if areas[i] < min_area:
                 continue
@@ -251,7 +301,7 @@ def detect_spots(lab: np.ndarray, size: tuple[int, int], ref_lab: np.ndarray,
                 # 等面積圓直徑佔長邊的百分比：與照片解析度無關，可與 min_spot_size 直接比較
                 "size_pct": round(float(np.sqrt(4 * areas[i] / np.pi) / max(H, W) * 100), 3),
                 "type": "region" if ratio >= REGION_RATIO else "spot",
-                "tone": classify_tone(mean_lab[i], ref_lab),
+                "tone": classify_tone(mean_lab[i], item_ref[i]),
                 "position": position_name(cx / W, cy / H),
                 "center": [round(cx), round(cy)],
                 "bbox": [round(x0 * sx), round(y0 * sy), round((x1 - x0) * sx), round((y1 - y0) * sy)],
@@ -285,7 +335,9 @@ def detect_spots(lab: np.ndarray, size: tuple[int, int], ref_lab: np.ndarray,
 
 def analyze(rgb: np.ndarray, rows: int = 5, cols: int = 5, threshold: float = 3.0,
             reference_hex: str | None = None, margin: float = 0.1,
-            spot_threshold: float | None = None, min_spot_size: float = 0.5) -> UniformityResult:
+            spot_threshold: float | None = None, min_spot_size: float = 0.5,
+            max_gradient: float | None = None, spot_mode: str = "global",
+            background_size: float = 10.0) -> UniformityResult:
     """rgb: (H, W, 3) uint8 影像。分兩階段判定：
 
     第一階段（整體）：
@@ -296,6 +348,14 @@ def analyze(rgb: np.ndarray, rows: int = 5, cols: int = 5, threshold: float = 3.
 
     第二階段（小點）：見 detect_spots，以同一參考色逐像素找局部瑕疵；
     spot_threshold 未指定時沿用 threshold。
+
+    max_gradient 有值時，第一階段改為「扣除平滑漸層」：以平面擬合各格顏色（fit_gradient），
+    各格改與擬合值比較（殘差 ≤ threshold），另外要求漸層幅度 ≤ max_gradient。可容忍打光不均造成的
+    平滑亮暗變化，仍抓得到中央泛色、斑駁等局部不均。注意：平順的單側褪色若幅度在 max_gradient 內，
+    與打光漸層無法區分，會被放過。
+
+    spot_mode="local" 時，第二階段改與周圍背景比較（local_background，範圍 background_size%），
+    不受打光漸層影響；比背景範圍大的瑕疵交由第一階段負責。
 
     兩階段皆通過才算 passed；score 取兩者較低者。
     """
@@ -311,6 +371,12 @@ def analyze(rgb: np.ndarray, rows: int = 5, cols: int = 5, threshold: float = 3.
         raise ValueError("threshold 與 spot_threshold 須大於 0")
     if min_spot_size < 0:
         raise ValueError("min_spot_size 不可為負")
+    if max_gradient is not None and max_gradient <= 0:
+        raise ValueError("max_gradient 須大於 0")
+    if spot_mode not in ("global", "local"):
+        raise ValueError("spot_mode 須為 global 或 local")
+    if not 1 <= background_size <= 50:
+        raise ValueError("background_size 須介於 1–50（長邊百分比）")
     H, W = rgb.shape[:2]
     if H < rows * 2 or W < cols * 2:
         raise ValueError(f"影像太小（{W}×{H}），無法切成 {cols}×{rows} 格")
@@ -338,7 +404,13 @@ def analyze(rgb: np.ndarray, rows: int = 5, cols: int = 5, threshold: float = 3.
     coverage = float(np.mean(delta_e_2000(work, ref_lab) <= s_thr))
     ref_hex = "#" + "".join(f"{round(v):02X}" for v in lab_to_srgb(ref_lab))
 
-    de = delta_e_2000(cell_lab, ref_lab)
+    gradient = None
+    if max_gradient is None:
+        cell_ref = np.broadcast_to(ref_lab, cell_lab.shape)
+    else:
+        cell_ref, gradient = fit_gradient(cell_lab)
+        gradient.update(limit=max_gradient, passed=gradient["span"] <= max_gradient)
+    de = delta_e_2000(cell_lab, cell_ref)
     worst = np.unravel_index(int(np.argmax(de)), de.shape)
 
     # 亮度均勻度（顯示器/照明常用）：最暗格 Y / 最亮格 Y
@@ -348,14 +420,20 @@ def analyze(rgb: np.ndarray, rows: int = 5, cols: int = 5, threshold: float = 3.
     lum_u = float(Y.min() / Y.max()) if Y.max() > 0 else 1.0
 
     de_max = float(de.max())
-    grid_passed = de_max <= threshold
+    grid_passed = de_max <= threshold and (gradient is None or gradient["passed"])
 
     # 第二階段：整體判定後，再逐像素找單一小點等局部瑕疵
     # 最小瑕疵尺寸以「長邊百分比」表示（等面積圓直徑），換算成本張影像的像素面積；照片大小不同仍是同一標準
     min_area = np.pi / 4 * (min_spot_size / 100 * max(H, W)) ** 2
-    spots, pixel_de, item_map = detect_spots(work, (H, W), ref_lab, s_thr, min_area)
+    spot_ref = local_background(work, background_size) if spot_mode == "local" else ref_lab
+    spots, pixel_de, item_map = detect_spots(work, (H, W), spot_ref, s_thr, min_area)
     spots["min_spot_size_pct"] = min_spot_size
-    score = min(_score(de_max, threshold), _score(spots["delta_e_max"], s_thr))
+    spots["mode"] = spot_mode
+    spots["background_size_pct"] = background_size if spot_mode == "local" else None
+    stage1_score = _score(de_max, threshold)
+    if gradient is not None:
+        stage1_score = min(stage1_score, _score(gradient["span"], max_gradient))
+    score = min(stage1_score, _score(spots["delta_e_max"], s_thr))
 
     rnd = lambda x, n=3: round(float(x), n)
     return UniformityResult(
@@ -372,7 +450,7 @@ def analyze(rgb: np.ndarray, rows: int = 5, cols: int = 5, threshold: float = 3.
         lightness_std=rnd(cell_lab[..., 0].std()),
         luminance_uniformity=rnd(lum_u, 4),
         worst_cell={"row": int(worst[0]), "col": int(worst[1]), "delta_e": rnd(de_max),
-                    "tone": classify_tone(cell_lab[worst], ref_lab),
+                    "tone": classify_tone(cell_lab[worst], cell_ref[worst]),
                     "position": position_name((worst[1] + 0.5) / cols, (worst[0] + 0.5) / rows)},
         cells_over_threshold=int((de > threshold).sum()),
         threshold=threshold,
@@ -380,6 +458,8 @@ def analyze(rgb: np.ndarray, rows: int = 5, cols: int = 5, threshold: float = 3.
         spots=spots,
         passed=grid_passed and spots["passed"],
         score=round(score, 1),
+        grid_mode="reference" if gradient is None else "detrended",
+        gradient=gradient,
         pixel_delta_e=pixel_de,
         defect_map=item_map,
     )

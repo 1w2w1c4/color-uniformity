@@ -1,0 +1,37 @@
+# Agent（POST /v1/agent）設定。
+# - 優先序：環境變數 > 本檔 > 程式預設值。
+# - 本檔路徑可用環境變數 AGENT_CONFIG 指定其他位置。
+# - 修改後需重啟 API 才會生效。
+# - 判定標準（門檻、切格等）不在這裡，請改 sites.yaml；不論用哪個 LLM，合格與否都由 uniformity.py 判定。
+
+agent:
+  provider: anthropic        # 環境變數 AGENT_PROVIDER；對應下方 providers 的名稱。目前已實作：anthropic
+  model: claude-opus-5-5     # 環境變數 AGENT_MODEL；須是該 provider 的模型名稱
+  max_tokens: 16000          # 單次回覆最大 token 數
+  max_steps: 25              # 單次請求最多呼叫模型幾次，避免無限循環
+  max_items: 10              # 工具回傳的瑕疵清單上限（節省 token）
+
+# 各 LLM 廠商的連線與專屬參數。只有 agent.provider 指定的那一段會被讀取。
+providers:
+  anthropic:
+    api_key: null            # 建議用環境變數帶入，保持 null。⚠ 若填在這裡，請勿 commit
+    api_key_env: ANTHROPIC_API_KEY   # api_key 為 null 時，從這個環境變數讀金鑰
+    base_url: null           # null = 官方 API；走代理或閘道時才填
+    timeout: 300             # 單次 API 請求逾時（秒）
+    max_retries: 2           # 連線錯誤、429、5xx 自動重試次數
+    effort: medium           # 環境變數 AGENT_EFFORT；low / medium / high / xhigh / max
+    fallbacks: true          # 請求被安全機制拒絕時，自動改用其他模型重跑
+
+  # 範例：之後接其他廠商時加一段（需另外實作轉接器，目前選用會在啟動時報錯）
+  # openai:
+  #   api_key: null
+  #   api_key_env: OPENAI_API_KEY
+  #   base_url: null         # 相容 OpenAI 格式的服務（Ollama、vLLM…）填其網址，如 http://localhost:11434/v1
+  #   timeout: 300
+
+paths:
+  image_dir: images          # 環境變數 IMAGE_DIR；agent 只能讀這個資料夾。相對路徑以專案根目錄為準
+
+session:
+  ttl: 3600                  # 對話閒置多久（秒）後清除
+  max_sessions: 200          # 同時保留的對話數上限，超過時清除最久沒用的

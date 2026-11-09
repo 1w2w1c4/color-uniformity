@@ -38,11 +38,11 @@ curl -F file=@panel.jpg -F site=site_a -F threshold=2.5 [-F roi=100,50,800,600] 
 
 每次呼叫會在 `result/` 輸出 `<檔名>_heatmap.png`（路徑見回傳的 `heatmap_path`；`-F heatmap=false` 可關閉；環境變數 `RESULT_DIR` 可改輸出位置）。同檔名會覆蓋。
 
-- 標題列：合格／不合格（圖示＋文字）、檔名、site、基準色
+- 標題列：Pass／Fail（圖示＋文字）、檔名、site、基準色
 - 左：原圖，局部瑕疵以描邊標示，過小的另加方框，編號與 JSON `spots.items` 順序相同
 - 中：第一階段格子熱圖，每格標 ΔE 值，粗黑框 = 超過整體門檻
 - 右：第二階段逐像素熱圖
-- 色階固定 0–10（淺藍 = 均勻、深藍 = 不均勻，≥10 皆最深），不同圖片可直接比較；標出兩階段門檻
+- 色階固定 0–20（淺藍 = 均勻、深藍 = 不均勻，≥20 皆最深），不同圖片可直接比較；標出兩階段門檻
 - 底部：`summary` 綜合說明
 
 ## Site 標準
@@ -50,15 +50,28 @@ curl -F file=@panel.jpg -F site=site_a -F threshold=2.5 [-F roi=100,50,800,600] 
 各 site 的判定標準寫在 [sites.yaml](sites.yaml)（也可用環境變數 `SITES_CONFIG` 指定其他路徑），修改後不需重啟，下一次請求即生效。
 
 - 優先序：**請求參數 > site 標準 > default**；site 沒寫的欄位沿用 default。
-- 可設定欄位：`threshold`、`spot_threshold`、`min_spot_size`、`rows`、`cols`、`margin`、`reference`。
+- 可設定欄位：`threshold`、`spot_threshold`、`min_spot_size`、`rows`、`cols`、`margin`、`reference`、`max_gradient`、`spot_mode`、`background_size`（新欄位在 default 沒寫時採原本做法，舊設定檔不需修改）。
 - 回傳的 `site` 與 `applied_settings` 會列出每個欄位實際採用的值與來源（`request` / `site:<名稱>` / `default`），方便追溯。
 - `GET /v1/sites` 查詢所有 site 的完整標準；未知的 site 回 422 並列出可用名稱；設定檔有誤回 500 並指出錯誤欄位。
+
+### 打光不均時：漸層拆解與周圍比較
+
+原本兩階段都和「整張照片的主色」比較，打光不均（例如左亮右暗）會讓正常區域也超過門檻。兩個選項可分別開啟（範例見 `sites.yaml` 的 `site_c`）：
+
+| 欄位 | 作用 | 盲點 |
+|---|---|---|
+| `max_gradient`（第一階段） | 以平面擬合各格顏色，拆成「平滑漸層」與「殘差」。殘差 ≤ `threshold` 且漸層幅度 ≤ `max_gradient` 才通過。中央泛色、斑駁仍會被殘差抓到 | 幅度在上限內的平順單側褪色與打光無法區分，會被放過。根本解法是改善打光或平場校正 |
+| `spot_mode: local`（第二階段） | 每個像素改和周圍背景比較（範圍 `background_size`，長邊 %），漸層被抵消，`spot_threshold` 可降回約 5，淡色斑也抓得到 | 比背景範圍大的瑕疵會被當成背景，只剩邊緣；需由第一階段負責 |
+
+兩者一起開時，大面積由第一階段（殘差）負責、小點由第二階段（周圍）負責。也可用請求參數試算：`-F max_gradient=25 -F spot_mode=local -F spot_threshold=5`。
 
 | 回傳欄位 | 意義 |
 |---|---|
 | `summary` | 一段中文說明：結論＋第一階段（整體）結果＋第二階段（局部瑕疵）結果＋基準色 |
 | `passed` / `score` | 整體與小點皆通過才為 true；score 0–100（達門檻 = 60），取兩階段較低者 |
-| `grid_passed` | 第一階段（整體）結果：最大格子 ΔE00 ≤ threshold |
+| `grid_passed` | 第一階段（整體）結果：最大格子 ΔE00 ≤ threshold（`max_gradient` 有值時另需漸層幅度 ≤ max_gradient） |
+| `grid_mode` / `gradient` | `reference`＝各格對主色；`detrended`＝各格對擬合漸層，此時 `delta_e_grid` 為殘差，`gradient` 含 `span`（漸層幅度）、`limit`、`passed`、`bright_side`／`dark_side` |
+| `spots.mode` | 第二階段比較對象：`global` 整張主色／`local` 周圍背景（`spots.background_size_pct` 為範圍） |
 | `spots.passed` / `spots.count` | 第二階段（小點）結果：沒有任何尺寸 ≥ min_spot_size 的瑕疵即通過 |
 | `spots.items[]` | 每個瑕疵：`type`（spot 小點／region 佔畫面 ≥5% 的大面積）、`tone`（泛白／偏亮／偏暗／變灰／偏濃／偏色）、`position`（左上方…中央…右下方）、`center`、`bbox` [x,y,w,h]、`area_px`、`delta_e_max`，座標皆為原圖像素 |
 | `spots.defect_area_ratio` | 瑕疵總面積佔比 |
@@ -73,7 +86,7 @@ curl -F file=@panel.jpg -F site=site_a -F threshold=2.5 [-F roi=100,50,800,600] 
 
 `summary` 範例：
 
-> 【不合格】整體顏色均勻，但有局部瑕疵。第一階段整體均勻度通過：8×8 格中最大色差 ΔE 0.28（門檻 2，幾乎看不出）。第二階段局部瑕疵不通過：發現 1 處小點（門檻 ΔE 2.5、最小面積 15 px²），瑕疵總面積佔畫面 0.07%；最嚴重的是畫面中央的泛白小點，中心 (721, 541)、約 30×30 px，色差 ΔE 49.44（非常明顯）。基準色為影像主色 #C81622，佔畫面 99.9%。
+> 【Fail】整體顏色均勻，但有局部瑕疵。第一階段整體均勻度通過：8×8 格中最大色差 ΔE 0.28（門檻 2，幾乎看不出）。第二階段局部瑕疵不通過：發現 1 處小點（門檻 ΔE 2.5、最小面積 15 px²），瑕疵總面積佔畫面 0.07%；最嚴重的是畫面中央的泛白小點，中心 (721, 541)、約 30×30 px，色差 ΔE 49.44（非常明顯）。基準色為影像主色 #C81622，佔畫面 99.9%。
 
 ΔE00 參考：< 1 幾乎看不出、1–2 仔細看才看得出、2–3.5 一般人可察覺、> 5 明顯不同。
 
@@ -105,3 +118,28 @@ curl -F file=@panel.jpg -F site=site_a -F threshold=2.5 [-F roi=100,50,800,600] 
 報告圖輸出到 `result/<檔名>_pressure.png`：左邊是掃描影像加瑕疵編號，右邊是相對壓力圖（藍 = 偏低、紅 = 偏高），附 3×3 分區百分比和指向低壓側的箭頭。
 
 掃描建議：關閉自動色彩校正、自動曝光、去網紋和銳化；固定掃描器、DPI 和擺放位置。
+
+## Agent（自然語言操作，agent.py）
+
+`POST /v1/agent`：用一句話操作上述判定功能，Claude 會自己呼叫工具（`list_sites`、`list_images`、`check_uniformity`、`check_pressure`）並用中文彙整結果。**合格與否仍由判定程式決定**，Claude 只負責選工具與解讀。
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+.venv/bin/uvicorn main:app
+
+curl -X POST http://127.0.0.1:8000/v1/agent -H 'Content-Type: application/json' \
+     -d '{"message": "用 site_a 檢查所有影像，列出不合格的並說明原因"}'
+# 延續對話：帶入上次回傳的 session_id
+curl -X POST http://127.0.0.1:8000/v1/agent -H 'Content-Type: application/json' \
+     -d '{"message": "如果門檻放寬到 3 呢？", "session_id": "<上次的 session_id>"}'
+curl -X DELETE http://127.0.0.1:8000/v1/agent/<session_id>   # 清除對話
+```
+
+- 回傳：`reply`（中文回答）、`session_id`、`tool_calls`（實際呼叫了哪些工具、參數、是否出錯）。
+- 影像需放在 `IMAGE_DIR`（預設 `images/`），agent 只能讀取此資料夾內的檔案。
+- 設定寫在 [config.yaml](config.yaml)（路徑可用 `AGENT_CONFIG` 指定），修改後需重啟。優先序：環境變數（`AGENT_PROVIDER`、`AGENT_MODEL`、`AGENT_EFFORT`、`IMAGE_DIR`）> config.yaml > 預設值。
+  - `agent`：用哪個 `provider`、`model`，以及與廠商無關的上限（max_tokens、max_steps…）。
+  - `providers.<名稱>`：各 LLM 廠商的金鑰、`base_url`、逾時、重試與專屬參數；只讀取 `agent.provider` 指定的那段。目前已實作 `anthropic`，選用其他名稱會在啟動時報錯。
+- 金鑰建議用環境變數（名稱由 `api_key_env` 指定，預設 `ANTHROPIC_API_KEY`），`api_key` 保持 null；若填在檔案裡，請勿 commit。
+- 對話歷史存在記憶體，閒置 1 小時清除、重啟即消失；多 worker 部署需改用 Redis 等共用儲存。
+- 錯誤：未設定金鑰 503、同一 session 前一個請求未完成 409、Claude API 限流 429、其他 Claude API 錯誤 502。

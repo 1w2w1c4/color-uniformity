@@ -23,9 +23,15 @@ _FIELDS = {
     "cols": (int, lambda v: 1 <= v <= 50),
     "margin": (float, lambda v: 0 <= v < 0.5),
     "reference": (str, lambda v: hex_to_rgb(v) is not None),
+    "max_gradient": (float, lambda v: v > 0),
+    "spot_mode": (str, lambda v: v in SPOT_MODES),
+    "background_size": (float, lambda v: 1 <= v <= 50),
 }
-NULLABLE = {"spot_threshold", "reference"}
+NULLABLE = {"spot_threshold", "reference", "max_gradient"}
 SETTING_KEYS = tuple(_FIELDS)
+SPOT_MODES = ("global", "local")
+# 後來新增的欄位：default 區塊沒寫時採用此值（＝原本的判定方式），舊設定檔不需修改
+OPTIONAL_DEFAULTS = {"max_gradient": None, "spot_mode": "global", "background_size": 10.0}
 
 
 class SiteConfigError(Exception):
@@ -70,7 +76,10 @@ def parse_config(raw: object) -> tuple[dict, dict[str, dict]]:
     unknown = set(raw) - {"default", "sites"}
     if unknown:
         raise SiteConfigError(f"設定檔含未知區塊：{sorted(unknown)}")
-    default = _validate("default", raw["default"], require_all=True)
+    block = raw["default"]
+    if isinstance(block, dict):
+        block = {**OPTIONAL_DEFAULTS, **block}
+    default = _validate("default", block, require_all=True)
     sites = raw.get("sites") or {}
     if not isinstance(sites, dict):
         raise SiteConfigError("sites 須為鍵值設定")
